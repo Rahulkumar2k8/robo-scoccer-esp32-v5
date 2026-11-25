@@ -1,0 +1,92 @@
+name: Build ESP32 RC Wokwi Lab V5 (Android APK + ESP32 Preset Firmware)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'source/esp32_rc_wokwi_lab_android_v5.zip'
+      - '.github/workflows/build-v5-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract V5 source archive
+        run: |
+          test -s source/esp32_rc_wokwi_lab_android_v5.zip
+          unzip -q source/esp32_rc_wokwi_lab_android_v5.zip -d .
+          test -f esp32_rc_wokwi_lab_android/android_native/MainActivity.java
+          test -f esp32_rc_wokwi_lab_android/package.json
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install arduino-cli and compile built-in ESP32 preset firmware
+        working-directory: esp32_rc_wokwi_lab_android
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=/usr/local/bin sh
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          python3 scripts/build_preset_bins.py
+
+      - name: Install Capacitor and configure native Android USB-OTG serial bridge
+        working-directory: esp32_rc_wokwi_lab_android
+        run: |
+          npm install
+          npx cap add android
+          mkdir -p android/app/src/main/res/xml
+          cp usb_otg/device_filter.xml android/app/src/main/res/xml/device_filter.xml
+          cp android_native/UsbSerialBridge.java android/app/src/main/java/com/esp32rc/wokwilab/UsbSerialBridge.java
+          cp android_native/MainActivity.java android/app/src/main/java/com/esp32rc/wokwilab/MainActivity.java
+
+          python3 - << 'PY'
+          bg = open('android/build.gradle').read()
+          if 'jitpack.io' not in bg:
+              bg = bg.replace('mavenCentral()', 'mavenCentral()\n        maven { url "https://jitpack.io" }')
+              open('android/build.gradle', 'w').write(bg)
+
+          abg = open('android/app/build.gradle').read()
+          if 'usb-serial-for-android' not in abg:
+              abg = abg.replace('dependencies {', 'dependencies {\n    implementation "com.github.mik3y:usb-serial-for-android:3.8.0"')
+              open('android/app/build.gradle', 'w').write(abg)
+
+          mf = open('android/app/src/main/AndroidManifest.xml').read()
+          if 'android.hardware.usb.host' not in mf:
+              mf = mf.replace('<application', '<uses-feature android:name="android.hardware.usb.host" android:required="false" />\n    <application', 1)
+              open('android/app/src/main/AndroidManifest.xml', 'w').write(mf)
+          PY
+
+          npx cap sync android
+
+      - name: Compile Debug APK
+        working-directory: esp32_rc_wokwi_lab_android/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP32_RC_Wokwi_Lab-Android-APK
+          path: esp32_rc_wokwi_lab_android/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
